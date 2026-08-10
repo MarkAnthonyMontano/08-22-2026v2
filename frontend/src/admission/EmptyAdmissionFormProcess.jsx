@@ -3,75 +3,54 @@ import React, {
   useEffect,
   useContext,
   useRef,
-  useLayoutEffect,
+  forwardRef,
+  useImperativeHandle,
 } from "react";
+
 import { SettingsContext } from "../App";
-import axios from "axios";
-import { Box, Container, useMediaQuery, useTheme } from "@mui/material";
+import { Box, Container } from "@mui/material";
 import EaristLogo from "../assets/EaristLogo.png";
 import ForwardIcon from "@mui/icons-material/Forward";
-import { QRCodeSVG } from "qrcode.react";
-import "../styles/Print.css";
 import API_BASE_URL from "../apiConfig";
 
-// Fixed print width (8.5in @ 96dpi). The permit is built at this fixed width
-// so print/PDF output never changes; on small screens we scale it down
-// visually via CSS transform instead of rewriting the table layout.
-// Same approach and same constant as ExamAttendanceScanner.jsx.
-const PERMIT_WIDTH_PX = 816;
-
-// ✅ Accept personId as a prop
-const ApplicantExamPermit = ({ personId, steps }) => {
+/**
+ * EmptyAdmissionFormProcess
+ * ──────────────────────────────────────────────────────────────────────────
+ * This is a 1:1 structural clone of AdmissionFormProcess.jsx — same table,
+ * same colSpans, same widths/heights, same header layout, same two-copy
+ * (College Dean's / Registrar's) print structure. The ONLY differences are:
+ *   1. Every {person.xxx} value is blank (no data to fill in with).
+ *   2. The QR code / 1x1 photo box on the right of the header is an empty
+ *      bordered box of the exact same size — no QR code, no image needed.
+ *
+ * Because the markup is identical, it prints/exports pixel-for-pixel the
+ * same as AdmissionFormProcess through the SAME backend route
+ * (/api/generate-admission-form-pdf) — no new PDF route needed for layout,
+ * only if you want a distinct filename/audit label (see chat notes).
+ */
+const EmptyAdmissionFormProcess = forwardRef((props, ref) => {
+  const { controlNumber: controlNumberProp } = props;
   const settings = useContext(SettingsContext);
-  const colors = settings?.colors || {};
   const branding = settings?.branding || {};
   const assets = settings?.assets || {};
-  const headerColor = colors.header || "#1976d2";
-  const theme = useTheme();
-
-  // ---------------- Responsive breakpoints (same as ExamAttendanceScanner) ----------------
-  const isMobile = useMediaQuery(theme.breakpoints.down("sm")); // <600px (phones)
-  const isTablet = useMediaQuery(theme.breakpoints.down("md")); // <900px (phones + small tablets)
-
-  const [titleColor, setTitleColor] = useState("#000000");
-  const [subtitleColor, setSubtitleColor] = useState("#555555");
-  const [borderColor, setBorderColor] = useState("#000000");
-  const [mainButtonColor, setMainButtonColor] = useState("#1976d2");
-  const [subButtonColor, setSubButtonColor] = useState("#ffffff");
-  const [stepperColor, setStepperColor] = useState("#000000");
 
   const [fetchedLogo, setFetchedLogo] = useState(null);
   const [companyName, setCompanyName] = useState("");
   const [shortTerm, setShortTerm] = useState("");
   const [campusAddress, setCampusAddress] = useState("");
-  const [branches, setBranches] = useState([]);
 
   useEffect(() => {
     if (!settings) return;
 
-    // 🎨 Colors
-    if (colors.title) setTitleColor(colors.title);
-    if (colors.subtitle) setSubtitleColor(colors.subtitle);
-    if (colors.border) setBorderColor(colors.border);
-    if (colors.mainButton)
-      setMainButtonColor(colors.mainButton);
-    if (colors.subButton) setSubButtonColor(colors.subButton);
-    if (colors.stepper) setStepperColor(colors.stepper);
-
-    // 🏫 Logo
     if (assets.logoUrl) {
-      setFetchedLogo(`${assets.logoUrl}`);
+      setFetchedLogo(assets.logoUrl);
     } else {
       setFetchedLogo(EaristLogo);
     }
 
-    // 🏷️ School Info
     if (branding.companyName) setCompanyName(branding.companyName);
     if (branding.shortTerm) setShortTerm(branding.shortTerm);
-    if (branding.campusAddress) setCampusAddress(branding.campusAddress);
-
-    // ✅ Branches (JSON stored in DB)
-    setBranches(settings?.branches || []);
+    setCampusAddress(branding.campusAddress || "");
   }, [settings]);
 
   const words = companyName.trim().split(" ");
@@ -79,367 +58,50 @@ const ApplicantExamPermit = ({ personId, steps }) => {
   const firstLine = words.slice(0, middle).join(" ");
   const secondLine = words.slice(middle).join(" ");
 
-  const [person, setPerson] = useState({
-    campus: "",
-    profile_img: "",
-    last_name: "",
-    first_name: "",
-    middle_name: "",
-    extension: "",
-  });
+  const controlNumber = controlNumberProp || null;
 
-  useEffect(() => {
-    if (settings && branding.campusAddress) {
-      setCampusAddress(branding.campusAddress);
+  const divToPrintRef = useRef();
+  useImperativeHandle(ref, () => divToPrintRef.current, []);
+
+  document.addEventListener("contextmenu", (e) => e.preventDefault());
+
+  document.addEventListener("keydown", (e) => {
+    const isBlockedKey =
+      e.key === "F12" ||
+      e.key === "F11" ||
+      (e.ctrlKey &&
+        e.shiftKey &&
+        (e.key.toLowerCase() === "i" || e.key.toLowerCase() === "j")) ||
+      (e.ctrlKey && e.key.toLowerCase() === "u") ||
+      (e.ctrlKey && e.key.toLowerCase() === "p");
+
+    if (isBlockedKey) {
+      e.preventDefault();
+      e.stopPropagation();
     }
-  }, [settings]);
-
-  const [examSchedule, setExamSchedule] = useState(null);
-  const [curriculumOptions, setCurriculumOptions] = useState([]);
-  const [examScores, setExamScores] = useState({
-    english: null,
-    science: null,
-    filipino: null,
-    math: null,
-    abstract: null,
-    final: null,
-    status: null,
   });
-
-  const [scheduledBy, setScheduledBy] = useState("");
-
-  // ✅ First data fetch
-  useEffect(() => {
-    const pid = personId || localStorage.getItem("person_id");
-    if (!pid) return;
-
-    const fetchData = async () => {
-      try {
-        // Fetch person
-        const res = await axios.get(`${API_BASE_URL}/api/person/${pid}`);
-        let personData = res.data;
-
-        // Fetch applicant number separately
-        const applicantRes = await axios.get(
-          `${API_BASE_URL}/api/applicant_number/${pid}`,
-        );
-        if (applicantRes.data?.applicant_number) {
-          personData.applicant_number = applicantRes.data.applicant_number;
-        }
-
-        setPerson(personData);
-
-        if (applicantRes.data?.applicant_number) {
-          const applicant_number = applicantRes.data.applicant_number;
-
-          // ✅ Use new unified verification route
-          const verifyStatusRes = await axios.get(
-            `${API_BASE_URL}/api/verification-status/${applicant_number}`,
-          );
-
-          const { verified, totalRequired, totalVerified, hasSchedule } =
-            verifyStatusRes.data;
-
-          // ✅ FIX: if applicant has schedule, treat as verified
-          setIsVerified(verified || hasSchedule);
-
-          if (!verified) {
-            console.warn(
-              `Applicant not verified. Verified ${totalVerified}/${totalRequired} requirements. Schedule: ${hasSchedule ? "Yes" : "No"}`,
-            );
-          }
-
-          // Always load exam schedule (for display)
-          const schedRes = await axios.get(
-            `${API_BASE_URL}/api/exam-schedule/${applicant_number}`,
-          );
-          setExamSchedule(schedRes.data);
-        }
-
-        // Fetch programs
-        const progRes = await axios.get(`${API_BASE_URL}/api/applied_program`);
-        setCurriculumOptions(progRes.data);
-
-        // ✅ Fetch registrar (Scheduled By)
-        const registrarRes = await axios.get(
-          `${API_BASE_URL}/api/scheduled-by/registrar`,
-        );
-        if (registrarRes.data?.fullName) {
-          setScheduledBy(registrarRes.data.fullName);
-        }
-      } catch (err) {
-        console.error("Error fetching exam permit data:", err);
-      }
-    };
-
-    fetchData();
-  }, [personId]);
-
-  // ✅ Secondary fetch for updates
-  useEffect(() => {
-    const pid = personId || localStorage.getItem("person_id");
-    if (!pid) return;
-
-    // fetch person
-    axios
-      .get(`${API_BASE_URL}/api/person/${pid}`)
-      .then(async (res) => {
-        let personData = res.data;
-
-        // fetch applicant_number separately
-        const applicantRes = await axios.get(
-          `${API_BASE_URL}/api/applicant_number/${pid}`,
-        );
-        if (applicantRes.data?.applicant_number) {
-          personData.applicant_number = applicantRes.data.applicant_number;
-        }
-
-        setPerson(personData);
-      })
-      .catch((err) => console.error(err));
-
-    // fetch applicant number then schedule
-    axios
-      .get(`${API_BASE_URL}/api/applicant_number/${pid}`)
-      .then((res) => {
-        const applicant_number = res.data?.applicant_number;
-        if (applicant_number) {
-          return axios.get(
-            `${API_BASE_URL}/api/exam-schedule/${applicant_number}`,
-          );
-        }
-      })
-      .then((res) => setExamSchedule(res?.data))
-      .catch((err) => console.error(err));
-
-    // fetch curriculum/programs
-    axios
-      .get(`${API_BASE_URL}/api/applied_program`)
-      .then((res) => setCurriculumOptions(res.data))
-      .catch((err) => console.error(err));
-
-    // ✅ Fetch registrar name again for refresh
-    axios
-      .get(`${API_BASE_URL}/api/scheduled-by/registrar`)
-      .then((res) => {
-        if (res.data?.fullName) setScheduledBy(res.data.fullName);
-      })
-      .catch((err) => console.error("Error fetching registrar name:", err));
-  }, [personId]);
-
-  const [qualifyingResult, setQualifyingResult] = useState(null);
-  const [interviewResult, setInterviewResult] = useState(null);
-  const [totalAverage, setTotalAverage] = useState(null);
-
-  // ✅ Fetch Exam Scores + Qualifying + Interview + Total Ave.
-  useEffect(() => {
-    const fetchScores = async () => {
-      try {
-        const applicantNumberRes = await axios.get(
-          `${API_BASE_URL}/api/applicant_number/${personId}`,
-        );
-        const applicantNumber = applicantNumberRes.data?.applicant_number;
-
-        // 2️⃣ Entrance exam scores (already working)
-        const res = await axios.get(
-          `${API_BASE_URL}/api/applicants-with-number`,
-        );
-        const applicants = Array.isArray(res.data)
-          ? res.data
-          : res.data?.data || [];
-        const applicant = applicants.find(
-          (a) => a.applicant_number === applicantNumber,
-        );
-
-        if (applicant) {
-          const scores = applicant.scores || {};
-          const scoreValues = Object.values(scores).map(Number);
-          const english = Number(applicant.english ?? scoreValues[0]) || 0;
-          const science = Number(applicant.science ?? scoreValues[1]) || 0;
-          const filipino = Number(applicant.filipino ?? scoreValues[2]) || 0;
-          const math = Number(applicant.math ?? scoreValues[3]) || 0;
-          const abstract = Number(applicant.abstract ?? scoreValues[4]) || 0;
-          const finalRating = applicant.final_rating
-            ? Number(applicant.final_rating)
-            : (english + science + filipino + math + abstract) / 5;
-
-          setExamScores({
-            english,
-            science,
-            filipino,
-            math,
-            abstract,
-            final: finalRating.toFixed(2),
-            status: applicant.exam_status ?? applicant.status ?? "N/A",
-          });
-        }
-
-        // 3️⃣ Get Qualifying / Interview / Total Ave from person_status_table
-        const statusRes = await axios.get(
-          `${API_BASE_URL}/api/person_status/${personId}`,
-        );
-        const data = statusRes.data;
-
-        if (data) {
-          setQualifyingResult(data.qualifying_result ?? null);
-          setInterviewResult(data.interview_result ?? null);
-          setTotalAverage(data.exam_result ?? null);
-        }
-      } catch (err) {
-        console.error("❌ Failed to fetch applicant scores:", err);
-      }
-    };
-
-    if (personId) fetchScores();
-  }, [personId]);
-
-  const [isVerified, setIsVerified] = useState(false);
-
-  const renderStepStatus = (status) => {
-    if (!status) return null;
-
-    const label = String(status).toUpperCase();
-    const color = label === "FAILED" ? "red" : "green";
-
-    return <span style={{ color, fontWeight: "bold" }}>{label}</span>;
-  };
-
-  const renderCollegeApprovalStatus = (status) => {
-    if (!status) return null;
-
-    const label = String(status).toUpperCase();
-    let color = "orange";
-
-    if (label === "ACCEPTED") color = "green";
-    else if (label === "REJECTED") color = "red";
-
-    return <span style={{ color, fontWeight: "bold" }}>{label}</span>;
-  };
-
-  // ---------------- Mobile scaling for the printable permit ----------------
-  // Same pattern as ExamAttendanceScanner.jsx: fixed-width content measured
-  // internally (own ref — no longer dependent on a printRef prop from the
-  // parent), scaled down via CSS transform to fit small screens, with the
-  // wrapper height compensated so no blank space is left below the shrunk
-  // content. Scale/height are rounded to avoid ResizeObserver feedback loops.
-  const scaleWrapperRef = useRef(null);
-  const contentRef = useRef(null);
-  const [permitScale, setPermitScale] = useState(1);
-  const [scaledHeight, setScaledHeight] = useState(null);
-
-  useLayoutEffect(() => {
-    let rafId = null;
-
-    const computeScale = () => {
-      const wrapper = scaleWrapperRef.current;
-      const content = contentRef.current;
-      if (!wrapper || !content) return;
-
-      const available = wrapper.clientWidth;
-      const rawScale =
-        available > 0 && available < PERMIT_WIDTH_PX
-          ? available / PERMIT_WIDTH_PX
-          : 1;
-
-      // Round to 2 decimal places so tiny sub-pixel differences don't
-      // count as "changed" and re-trigger the observer forever.
-      const nextScale = Math.round(rawScale * 100) / 100;
-      const nextHeight = Math.round(content.scrollHeight * nextScale);
-
-      setPermitScale((prev) => (prev === nextScale ? prev : nextScale));
-      setScaledHeight((prev) => (prev === nextHeight ? prev : nextHeight));
-    };
-
-    const scheduleCompute = () => {
-      if (rafId) cancelAnimationFrame(rafId);
-      rafId = requestAnimationFrame(computeScale);
-    };
-
-    computeScale();
-
-    window.addEventListener("resize", scheduleCompute);
-    window.addEventListener("orientationchange", scheduleCompute);
-
-    const ro =
-      typeof ResizeObserver !== "undefined" && contentRef.current
-        ? new ResizeObserver(scheduleCompute)
-        : null;
-    if (ro && contentRef.current) ro.observe(contentRef.current);
-
-    return () => {
-      if (rafId) cancelAnimationFrame(rafId);
-      window.removeEventListener("resize", scheduleCompute);
-      window.removeEventListener("orientationchange", scheduleCompute);
-      if (ro) ro.disconnect();
-    };
-  }, [
-    person,
-    examSchedule,
-    curriculumOptions,
-    steps,
-    qualifyingResult,
-    interviewResult,
-    totalAverage,
-    isVerified,
-  ]);
-
-  if (!person) return <div>Loading Exam Permit...</div>;
 
   return (
     <Box
       sx={{
+        height: "calc(100vh - 150px)",
+        overflowY: "auto",
+        paddingRight: 1,
         backgroundColor: "transparent",
         mt: 1,
-        p: isMobile ? 1.5 : 2,
+        padding: 2,
       }}
     >
-      {/* Scale wrapper: measures available width, shrinks the fixed-width
-                permit to fit, and reserves the correct (shrunk) height so no
-                blank space is left below it. Resets fully for print. */}
-      <Box
-        ref={scaleWrapperRef}
-        className="exam-permit-scale-wrapper"
-        sx={{
-          width: "100%",
-          maxWidth: `${PERMIT_WIDTH_PX}px`,
-          margin: "10px auto 0",
-
-          height: scaledHeight ? `${scaledHeight}px` : "auto",
-        }}
-      >
-        <div
-          ref={contentRef}
-          className="exam-permit-container"
-          style={{
-            width: `${PERMIT_WIDTH_PX}px`,
-            backgroundColor: "white",
-            boxSizing: "border-box",
-            transform: `scale(${permitScale})`,
-            transformOrigin: "top left",
-          }}
-        >
-          <style>{`
-                        @media print {
-                            .exam-permit-scale-wrapper {
-                                height: auto !important;
-                                max-width: none !important;
-                                overflow: visible !important;
-                            }
-                            .exam-permit-container {
-                                transform: none !important;
-                                width: auto !important;
-                            }
-                        }
-                    `}</style>
-
+      <Container>
+        <div ref={divToPrintRef} style={{ marginBottom: "10%" }}>
+          {/* ─── COPY 1: College Dean's Copy ────────────────────────────── */}
           <Container>
             <div
               className="student-table"
               style={{
-                width: "8in", // matches table width assuming 8in for 40 columns
+                width: "8in",
                 maxWidth: "100%",
                 margin: "0 auto",
-
                 boxSizing: "border-box",
                 padding: "10px 0",
               }}
@@ -448,11 +110,10 @@ const ApplicantExamPermit = ({ personId, steps }) => {
                 style={{
                   display: "flex",
                   alignItems: "center",
-                  justifyContent: "space-between", // spread logo, text, profile+QR
+                  justifyContent: "space-between",
                   flexWrap: "nowrap",
                 }}
               >
-                {/* Logo (Left Side) */}
                 <div style={{ flexShrink: 0 }}>
                   <img
                     src={fetchedLogo}
@@ -463,12 +124,23 @@ const ApplicantExamPermit = ({ personId, steps }) => {
                       objectFit: "cover",
                       marginLeft: "10px",
                       marginTop: "-25px",
-                      borderRadius: "50%", // ✅ Makes it perfectly circular
+                      borderRadius: "50%",
                     }}
                   />
+                  {controlNumber && (
+                    <div
+                      style={{
+                        fontSize: "13px",
+                        fontWeight: "bold",
+                        color: "#8B0000",
+                        textAlign: "center",
+                      }}
+                    >
+                      Document No.: {controlNumber}
+                    </div>
+                  )}
                 </div>
 
-                {/* Text Block (Center) */}
                 <div
                   style={{
                     flexGrow: 1,
@@ -481,14 +153,14 @@ const ApplicantExamPermit = ({ personId, steps }) => {
                     paddingBottom: 0,
                   }}
                 >
-                  <div style={{ fontSize: "13px", fontFamily: "Arial" }}>
+                  <div style={{ fontFamily: "Arial", fontSize: "13px" }}>
                     Republic of the Philippines
                   </div>
                   <div
                     style={{
                       fontWeight: "bold",
                       fontFamily: "Arial",
-                      fontSize: "14px",
+                      fontSize: "16px",
                       textTransform: "Uppercase",
                     }}
                   >
@@ -499,7 +171,7 @@ const ApplicantExamPermit = ({ personId, steps }) => {
                       style={{
                         fontWeight: "bold",
                         fontFamily: "Arial",
-                        fontSize: "14px",
+                        fontSize: "16px",
                         textTransform: "Uppercase",
                       }}
                     >
@@ -507,25 +179,28 @@ const ApplicantExamPermit = ({ personId, steps }) => {
                     </div>
                   )}
                   {campusAddress && (
-                    <div
-                      style={{
-                        fontSize: "13px",
-                        fontFamily: "Arial",
-                      }}
-                    >
+                    <div style={{ fontSize: "13px", fontFamily: "Arial" }}>
                       {campusAddress}
                     </div>
                   )}
 
-                  <div style={{ fontSize: "13px", fontFamily: "Arial" }}>
-                    <b>OFFICE OF THE ADMISSION SERVICES</b>
+                  <div
+                    style={{
+                      fontWeight: "bold",
+                      fontFamily: "Arial",
+                      fontSize: "15px",
+                      letterSpacing: "1px",
+                      marginTop: "6px",
+                    }}
+                  >
+                    OFFICE OF THE ADMISSION SERVICES
                   </div>
 
                   <br />
 
                   <div
                     style={{
-                      fontSize: "13px",
+                      fontSize: "12px",
                       fontFamily: "Arial",
                       fontWeight: "bold",
                       marginBottom: "5px",
@@ -537,16 +212,17 @@ const ApplicantExamPermit = ({ personId, steps }) => {
                   </div>
                 </div>
 
-                {/* Profile + QR Code (Right Side) */}
                 <div
                   style={{
                     display: "flex",
-                    flexDirection: "row", // ✅ side by side
+                    flexDirection: "row",
                     alignItems: "center",
                     marginRight: "10px",
-                    gap: "10px", // ✅ 10px space between them
+                    gap: "10px",
                   }}
                 >
+                  {/* Same size/position as the QR/photo box in the filled
+                      form — left empty, no QR code or 1x1 photo needed. */}
                   <div
                     style={{
                       width: "1.3in",
@@ -554,40 +230,12 @@ const ApplicantExamPermit = ({ personId, steps }) => {
                       display: "flex",
                       justifyContent: "center",
                       alignItems: "center",
-                      border: "1px solid black", // ✅ same border as profile_img
-                      background: "#fff", // ✅ same background
+                      border: "1px solid black",
+                      background: "#fff",
                       flexShrink: 0,
-                      position: "relative", // ✅ needed for overlay text
+                      position: "relative",
                     }}
-                  >
-                    {person?.qr_code ? (
-                      <img
-                        src={`${API_BASE_URL}/uploads/${person.qr_code}`}
-                        alt="QR Code"
-                        style={{ width: "110px", height: "110px" }}
-                      />
-                    ) : (
-                      <QRCodeSVG
-                        value={`${window.location.origin}/applicant_profile/${person.applicant_number}`}
-                        size={110}
-                        level="H"
-                      />
-                    )}
-
-                    {/* Overlay applicant_number in middle */}
-                    <div
-                      style={{
-                        position: "absolute",
-                        fontSize: "10px",
-                        fontWeight: "bold",
-                        color: "maroon",
-                        background: "white",
-                        padding: "2px",
-                      }}
-                    >
-                      {person.applicant_number}
-                    </div>
-                  </div>
+                  />
                 </div>
               </div>
             </div>
@@ -600,22 +248,16 @@ const ApplicantExamPermit = ({ personId, steps }) => {
               fontFamily: "Arial",
               width: "8in",
               margin: "0 auto",
-
               marginTop: "-30px",
               textAlign: "center",
               tableLayout: "fixed",
             }}
           >
             <tbody>
-              {/* Name of Student Row */}
               <tr>
                 <td
                   colSpan={40}
-                  style={{
-                    fontSize: "12px",
-                    paddingTop: "5px",
-                    marginTop: 0,
-                  }}
+                  style={{ fontSize: "12px", paddingTop: "5px", marginTop: 0 }}
                 >
                   <div
                     style={{
@@ -643,56 +285,48 @@ const ApplicantExamPermit = ({ personId, steps }) => {
                       <span
                         style={{
                           width: "25%",
+                          height: "20px",
                           textAlign: "center",
-                          fontSize: "14.5px",
+                          fontSize: "12px",
                           borderBottom: "1px solid black",
                         }}
-                      >
-                        {person.last_name}
-                      </span>
+                      />
                       <span
                         style={{
                           width: "25%",
+                          height: "20px",
                           textAlign: "center",
-                          fontSize: "14.5px",
+                          fontSize: "12px",
                           borderBottom: "1px solid black",
                         }}
-                      >
-                        {person.first_name}
-                      </span>
+                      />
                       <span
                         style={{
                           width: "25%",
+                          height: "20px",
                           textAlign: "center",
-                          fontSize: "14.5px",
+                          fontSize: "12px",
                           borderBottom: "1px solid black",
                         }}
-                      >
-                        {person.middle_name}
-                      </span>
+                      />
                       <span
                         style={{
                           width: "25%",
+                          height: "20px",
                           textAlign: "center",
-                          fontSize: "14.5px",
+                          fontSize: "12px",
                           borderBottom: "1px solid black",
                         }}
-                      >
-                        {person.extension}
-                      </span>
+                      />
                     </div>
                   </div>
                 </td>
               </tr>
 
-              {/* Labels Row */}
               <tr>
                 <td
                   colSpan={40}
-                  style={{
-                    fontSize: "12px",
-                    paddingTop: "2px",
-                  }}
+                  style={{ fontSize: "12px", paddingTop: "2px" }}
                 >
                   <div
                     style={{
@@ -718,8 +352,7 @@ const ApplicantExamPermit = ({ personId, steps }) => {
                 </td>
               </tr>
 
-              {/* Email & Applicant ID */}
-              <tr style={{ fontSize: "13px" }}>
+              <tr style={{ fontSize: "12px" }}>
                 <td colSpan={20}>
                   <div
                     style={{
@@ -745,9 +378,7 @@ const ApplicantExamPermit = ({ personId, steps }) => {
                         fontSize: "12px",
                       }}
                     >
-                      <div style={{ marginTop: "-3px" }} className="dataField">
-                        {person.emailAddress}
-                      </div>
+                      <div style={{ marginTop: "2px" }} className="dataField" />
                     </span>
                   </div>
                 </td>
@@ -776,16 +407,13 @@ const ApplicantExamPermit = ({ personId, steps }) => {
                         fontSize: "12px",
                       }}
                     >
-                      <div style={{ marginTop: "-3px" }} className="dataField">
-                        {person.emailAddress}
-                      </div>
+                      <div style={{ marginTop: "2px" }} className="dataField" />
                     </span>
                   </div>
                 </td>
               </tr>
 
-              {/* Permanent Address */}
-              <tr style={{ fontSize: "13px" }}>
+              <tr style={{ fontSize: "12px" }}>
                 <td colSpan={40}>
                   <div
                     style={{
@@ -812,18 +440,13 @@ const ApplicantExamPermit = ({ personId, steps }) => {
                         fontSize: "12px",
                       }}
                     >
-                      <div style={{ marginTop: "-3px" }} className="dataField">
-                        {person.permanentStreet} {person.permanentBarangay}{" "}
-                        {person.permanentMunicipality} {person.permanentRegion}{" "}
-                        {person.permanentZipCode}
-                      </div>
+                      <div style={{ marginTop: "2px" }} className="dataField" />
                     </span>
                   </div>
                 </td>
               </tr>
 
-              {/* Cellphone No, Civil Status, Gender */}
-              <tr style={{ fontSize: "13px" }}>
+              <tr style={{ fontSize: "12px" }}>
                 <td colSpan={13}>
                   <div
                     style={{
@@ -849,9 +472,7 @@ const ApplicantExamPermit = ({ personId, steps }) => {
                         fontSize: "12px",
                       }}
                     >
-                      <div style={{ marginTop: "-3px" }} className="dataField">
-                        {person.cellphoneNumber}
-                      </div>
+                      <div style={{ marginTop: "2px" }} className="dataField" />
                     </span>
                   </div>
                 </td>
@@ -880,9 +501,7 @@ const ApplicantExamPermit = ({ personId, steps }) => {
                         fontSize: "12px",
                       }}
                     >
-                      <div style={{ marginTop: "-3px" }} className="dataField">
-                        {person.civilStatus}
-                      </div>
+                      <div style={{ marginTop: "2px" }} className="dataField" />
                     </span>
                   </div>
                 </td>
@@ -911,21 +530,13 @@ const ApplicantExamPermit = ({ personId, steps }) => {
                         fontSize: "12px",
                       }}
                     >
-                      <div style={{ marginTop: "-3px" }} className="dataField">
-                        {" "}
-                        {person.gender === 0
-                          ? "Male"
-                          : person.gender === 1
-                            ? "Female"
-                            : ""}
-                      </div>
+                      <div style={{ marginTop: "2px" }} className="dataField" />
                     </span>
                   </div>
                 </td>
               </tr>
 
-              {/* Date of Birth, Place of Birth, Age */}
-              <tr style={{ fontSize: "13px" }}>
+              <tr style={{ fontSize: "12px" }}>
                 <td colSpan={13}>
                   <div
                     style={{
@@ -951,9 +562,7 @@ const ApplicantExamPermit = ({ personId, steps }) => {
                         fontSize: "12px",
                       }}
                     >
-                      <div style={{ marginTop: "-3px" }} className="dataField">
-                        {person.birthOfDate}
-                      </div>
+                      <div style={{ marginTop: "2px" }} className="dataField" />
                     </span>
                   </div>
                 </td>
@@ -961,7 +570,7 @@ const ApplicantExamPermit = ({ personId, steps }) => {
                   <div
                     style={{
                       display: "flex",
-                      alignItems: "center",
+                      alignItems: "flex-start",
                       width: "100%",
                     }}
                   >
@@ -976,15 +585,17 @@ const ApplicantExamPermit = ({ personId, steps }) => {
                     </label>
                     <span
                       style={{
-                        flexGrow: 1,
+                        flex: 1,
                         borderBottom: "1px solid black",
                         height: "1.3em",
                         fontSize: "12px",
+                        minWidth: 0,
+                        whiteSpace: "normal",
+                        overflowWrap: "break-word",
+                        wordBreak: "break-word",
                       }}
                     >
-                      <div style={{ marginTop: "-3px" }} className="dataField">
-                        {person.birthPlace}
-                      </div>
+                      <div className="dataField">&nbsp;</div>
                     </span>
                   </div>
                 </td>
@@ -1013,16 +624,13 @@ const ApplicantExamPermit = ({ personId, steps }) => {
                         fontSize: "12px",
                       }}
                     >
-                      <div style={{ marginTop: "-3px" }} className="dataField">
-                        {person.age}
-                      </div>
+                      <div style={{ marginTop: "2px" }} className="dataField" />
                     </span>
                   </div>
                 </td>
               </tr>
 
-              <tr style={{ fontSize: "13px" }}>
-                {/* Please Check */}
+              <tr style={{ fontSize: "12px" }}>
                 <td colSpan={10}>
                   <div
                     style={{
@@ -1047,13 +655,10 @@ const ApplicantExamPermit = ({ personId, steps }) => {
                         height: "1.3em",
                         display: "inline-block",
                       }}
-                    >
-                      {/* left blank intentionally */}
-                    </span>
+                    />
                   </div>
                 </td>
 
-                {/* Freshman */}
                 <td colSpan={10}>
                   <div
                     style={{
@@ -1082,16 +687,11 @@ const ApplicantExamPermit = ({ personId, steps }) => {
                         fontWeight: "bold",
                       }}
                     >
-                      <div style={{ marginTop: "-3px" }} className="dataField">
-                        {person.classifiedAs === "Freshman (First Year)"
-                          ? "✓"
-                          : ""}
-                      </div>
+                      <div style={{ marginTop: "2px" }} className="dataField" />
                     </span>
                   </div>
                 </td>
 
-                {/* Transferee */}
                 <td colSpan={10}>
                   <div
                     style={{
@@ -1120,18 +720,11 @@ const ApplicantExamPermit = ({ personId, steps }) => {
                         fontWeight: "bold",
                       }}
                     >
-                      <div style={{ marginTop: "-3px" }} className="dataField">
-                        {["Transferee", "Returnee", "Shiftee"].includes(
-                          person.classifiedAs,
-                        )
-                          ? "✓"
-                          : ""}
-                      </div>
+                      <div style={{ marginTop: "2px" }} className="dataField" />
                     </span>
                   </div>
                 </td>
 
-                {/* Others */}
                 <td colSpan={10}>
                   <div
                     style={{
@@ -1160,16 +753,13 @@ const ApplicantExamPermit = ({ personId, steps }) => {
                         fontWeight: "bold",
                       }}
                     >
-                      <div style={{ marginTop: "-3px" }} className="dataField">
-                        {person.classifiedAs === "Foreign Student" ? "✓" : ""}
-                      </div>
+                      <div style={{ marginTop: "2px" }} className="dataField" />
                     </span>
                   </div>
                 </td>
               </tr>
 
-              {/* Last School Attended */}
-              <tr style={{ fontSize: "13px" }}>
+              <tr style={{ fontSize: "12px" }}>
                 <td colSpan={40}>
                   <div
                     style={{
@@ -1195,16 +785,13 @@ const ApplicantExamPermit = ({ personId, steps }) => {
                         fontSize: "12px",
                       }}
                     >
-                      <div style={{ marginTop: "-3px" }} className="dataField">
-                        {person.schoolLastAttended1}
-                      </div>
+                      <div style={{ marginTop: "2px" }} className="dataField" />
                     </span>
                   </div>
                 </td>
               </tr>
 
-              {/* Degree/Program & Major */}
-              <tr style={{ fontSize: "13px" }}>
+              <tr style={{ fontSize: "12px" }}>
                 <td colSpan={25} style={{ verticalAlign: "top" }}>
                   <div
                     style={{
@@ -1227,20 +814,13 @@ const ApplicantExamPermit = ({ personId, steps }) => {
                         flexGrow: 1,
                         borderBottom: "1px solid black",
                         minHeight: "1.2em",
-                        whiteSpace: "normal", // allow text wrapping
-                        wordWrap: "break-word", // break long words
+                        whiteSpace: "normal",
+                        wordWrap: "break-word",
                         lineHeight: "1.4em",
                         paddingBottom: "2px",
                       }}
                     >
-                      {curriculumOptions.length > 0
-                        ? curriculumOptions.find(
-                            (item) =>
-                              item?.curriculum_id?.toString() ===
-                              (person?.program ?? "").toString(),
-                          )?.program_description ||
-                          (person?.program ?? "")
-                        : "Loading..."}
+                      &nbsp;
                     </div>
                   </div>
                 </td>
@@ -1273,13 +853,7 @@ const ApplicantExamPermit = ({ personId, steps }) => {
                         paddingBottom: "2px",
                       }}
                     >
-                      {curriculumOptions.length > 0
-                        ? curriculumOptions.find(
-                            (item) =>
-                              item?.curriculum_id?.toString() ===
-                              (person?.program ?? "").toString(),
-                          )?.major || ""
-                        : "Loading..."}
+                      &nbsp;
                     </div>
                   </div>
                 </td>
@@ -1292,16 +866,11 @@ const ApplicantExamPermit = ({ personId, steps }) => {
               <tr>
                 <td
                   colSpan={40}
-                  style={{
-                    height: "0.2in",
-                    fontSize: "72.5%",
-                    color: "white", // This is just a fallback; overridden below
-                  }}
+                  style={{ height: "0.2in", fontSize: "72.5%", color: "white" }}
                 >
                   <div
                     style={{
                       color: "black",
-
                       fontSize: "12px",
                       textAlign: "left",
                       display: "block",
@@ -1372,11 +941,9 @@ const ApplicantExamPermit = ({ personId, steps }) => {
                     border: "1px solid black",
                     textAlign: "center",
                     padding: "8px",
-                    fontSize: "18px",
+                    fontSize: "12px",
                   }}
-                >
-                  {steps.step1 && renderStepStatus(steps.step1Status)}
-                </td>
+                ></td>
                 <td
                   colSpan={5}
                   style={{
@@ -1388,11 +955,8 @@ const ApplicantExamPermit = ({ personId, steps }) => {
                   <ForwardIcon
                     sx={{
                       marginTop: "-53px",
-                      fontSize: 70, // normal screen size
-                      "@media print": {
-                        fontSize: 14, // smaller print size
-                        margin: 0,
-                      },
+                      fontSize: 70,
+                      "@media print": { fontSize: 14, margin: 0 },
                     }}
                   />
                 </td>
@@ -1411,39 +975,27 @@ const ApplicantExamPermit = ({ personId, steps }) => {
                     border: "1px solid black",
                     textAlign: "center",
                     padding: "8px",
-                    fontSize: "18px",
+                    fontSize: "12px",
                   }}
-                >
-                  {steps.qualifyingDone &&
-                    renderStepStatus(steps.qualifyingStatus)}
-                </td>
+                ></td>
                 <td
                   colSpan={5}
                   style={{
                     border: "1px solid black",
                     textAlign: "center",
                     padding: "8px",
-                    fontSize: "18px",
+                    fontSize: "12px",
                   }}
-                >
-                  {steps.interviewDone &&
-                    renderStepStatus(steps.interviewStatus)}
-                </td>
+                ></td>
                 <td
                   colSpan={5}
-                  style={{
-                    textAlign: "center",
-                    verticalAlign: "middle",
-                  }}
+                  style={{ textAlign: "center", verticalAlign: "middle" }}
                 >
                   <ForwardIcon
                     sx={{
                       marginTop: "-53px",
-                      fontSize: 70, // normal screen size
-                      "@media print": {
-                        fontSize: 14, // smaller print size
-                        margin: 0,
-                      },
+                      fontSize: 70,
+                      "@media print": { fontSize: 14, margin: 0 },
                     }}
                   />
                 </td>
@@ -1468,10 +1020,7 @@ const ApplicantExamPermit = ({ personId, steps }) => {
                 </td>
                 <td
                   colSpan={5}
-                  style={{
-                    textAlign: "center",
-                    verticalAlign: "middle",
-                  }}
+                  style={{ textAlign: "center", verticalAlign: "middle" }}
                 ></td>
 
                 <td
@@ -1491,10 +1040,7 @@ const ApplicantExamPermit = ({ personId, steps }) => {
                 </td>
                 <td
                   colSpan={5}
-                  style={{
-                    textAlign: "center",
-                    verticalAlign: "middle",
-                  }}
+                  style={{ textAlign: "center", verticalAlign: "middle" }}
                 ></td>
                 <td
                   colSpan={10}
@@ -1520,27 +1066,18 @@ const ApplicantExamPermit = ({ personId, steps }) => {
                     border: "1px solid black",
                     textAlign: "center",
                     padding: "8px",
-                    fontSize: "18px",
+                    fontSize: "12px",
                   }}
-                >
-                  {steps?.step3Status &&
-                    renderCollegeApprovalStatus(steps.step3Status)}
-                </td>
+                ></td>
                 <td
                   colSpan={5}
-                  style={{
-                    textAlign: "center",
-                    verticalAlign: "middle",
-                  }}
+                  style={{ textAlign: "center", verticalAlign: "middle" }}
                 >
                   <ForwardIcon
                     sx={{
                       marginTop: "-53px",
-                      fontSize: 70, // normal screen size
-                      "@media print": {
-                        fontSize: 14, // smaller print size
-                        margin: 0,
-                      },
+                      fontSize: 70,
+                      "@media print": { fontSize: 14, margin: 0 },
                     }}
                   />
                 </td>
@@ -1549,52 +1086,36 @@ const ApplicantExamPermit = ({ personId, steps }) => {
                   colSpan={11}
                   style={{
                     height: "50px",
-                    fontSize: "18px",
+                    fontSize: "12px",
                     fontFamily: "Arial",
                     border: "1px solid black",
                     padding: "8px",
-                    textAlign: "center",
+                    textAlign: "left",
                   }}
-                >
-                  {steps.step4 && (
-                    <span style={{ color: "green", fontWeight: "bold" }}>
-                      ✔ DONE
-                    </span>
-                  )}
-                </td>
+                ></td>
                 <td
                   colSpan={5}
-                  style={{
-                    textAlign: "center",
-                    verticalAlign: "middle",
-                  }}
+                  style={{ textAlign: "center", verticalAlign: "middle" }}
                 >
                   <ForwardIcon
                     sx={{
                       marginTop: "-53px",
-                      fontSize: 70, // normal screen size
-                      "@media print": {
-                        fontSize: 14, // smaller print size
-                        margin: 0,
-                      },
+                      fontSize: 70,
+                      "@media print": { fontSize: 14, margin: 0 },
                     }}
                   />
                 </td>
                 <td
                   colSpan={10}
                   style={{
-                    fontSize: "18px",
+                    fontSize: "12px",
                     fontFamily: "Arial",
                     border: "1px solid black",
                     padding: "8px",
-                    textAlign: "center",
+                    textAlign: "left",
                   }}
                 >
-                  {steps.step5 && (
-                    <span style={{ color: "green", fontWeight: "bold" }}>
-                      ✔ DONE
-                    </span>
-                  )}
+                  {" "}
                 </td>
               </tr>
 
@@ -1610,13 +1131,20 @@ const ApplicantExamPermit = ({ personId, steps }) => {
                 >
                   <div
                     style={{
-                      fontWeight: "normal",
+                      display: "flex",
+                      justifyContent: "space-between",
+                      alignItems: "center",
+                      marginTop: "10px",
                       fontSize: "12px",
                       color: "black",
-                      textAlign: "right",
+                      fontWeight: "normal",
                     }}
                   >
-                    Dean's Copy
+                    <span>
+                      {branding.shortTerm || shortTerm}-QSF-AS-001 Rev. 00
+                      (7.3.25)
+                    </span>
+                    <span>College Dean's Copy</span>
                   </div>
                 </td>
               </tr>
@@ -1633,14 +1161,13 @@ const ApplicantExamPermit = ({ personId, steps }) => {
             }}
           />
 
+          {/* ─── COPY 2: Registrar's Copy ───────────────────────────────── */}
           <Container>
             <div
-              className="student-table"
               style={{
-                width: "8in", // matches table width assuming 8in for 40 columns
+                width: "8in",
                 maxWidth: "100%",
                 margin: "0 auto",
-
                 boxSizing: "border-box",
                 padding: "10px 0",
               }}
@@ -1649,11 +1176,10 @@ const ApplicantExamPermit = ({ personId, steps }) => {
                 style={{
                   display: "flex",
                   alignItems: "center",
-                  justifyContent: "space-between", // spread logo, text, profile+QR
+                  justifyContent: "space-between",
                   flexWrap: "nowrap",
                 }}
               >
-                {/* Logo (Left Side) */}
                 <div style={{ flexShrink: 0 }}>
                   <img
                     src={fetchedLogo}
@@ -1664,12 +1190,23 @@ const ApplicantExamPermit = ({ personId, steps }) => {
                       objectFit: "cover",
                       marginLeft: "10px",
                       marginTop: "-25px",
-                      borderRadius: "50%", // ✅ Makes it perfectly circular
+                      borderRadius: "50%",
                     }}
                   />
+                  {controlNumber && (
+                    <div
+                      style={{
+                        fontSize: "12px",
+                        fontWeight: "bold",
+                        color: "#8B0000",
+                        textAlign: "center",
+                      }}
+                    >
+                      Document No.: {controlNumber}
+                    </div>
+                  )}
                 </div>
 
-                {/* Text Block (Center) */}
                 <div
                   style={{
                     flexGrow: 1,
@@ -1682,14 +1219,14 @@ const ApplicantExamPermit = ({ personId, steps }) => {
                     paddingBottom: 0,
                   }}
                 >
-                  <div style={{ fontSize: "13px", fontFamily: "Arial" }}>
+                  <div style={{ fontFamily: "Arial", fontSize: "13px" }}>
                     Republic of the Philippines
                   </div>
                   <div
                     style={{
                       fontWeight: "bold",
                       fontFamily: "Arial",
-                      fontSize: "14px",
+                      fontSize: "16px",
                       textTransform: "Uppercase",
                     }}
                   >
@@ -1700,7 +1237,7 @@ const ApplicantExamPermit = ({ personId, steps }) => {
                       style={{
                         fontWeight: "bold",
                         fontFamily: "Arial",
-                        fontSize: "14px",
+                        fontSize: "16px",
                         textTransform: "Uppercase",
                       }}
                     >
@@ -1708,25 +1245,28 @@ const ApplicantExamPermit = ({ personId, steps }) => {
                     </div>
                   )}
                   {campusAddress && (
-                    <div
-                      style={{
-                        fontSize: "13px",
-                        fontFamily: "Arial",
-                      }}
-                    >
+                    <div style={{ fontSize: "13px", fontFamily: "Arial" }}>
                       {campusAddress}
                     </div>
                   )}
 
-                  <div style={{ fontSize: "13px", fontFamily: "Arial" }}>
-                    <b>OFFICE OF THE ADMISSION SERVICES</b>
+                  <div
+                    style={{
+                      fontWeight: "bold",
+                      fontFamily: "Arial",
+                      fontSize: "15px",
+                      letterSpacing: "1px",
+                      marginTop: "6px",
+                    }}
+                  >
+                    OFFICE OF THE ADMISSION SERVICES
                   </div>
 
                   <br />
 
                   <div
                     style={{
-                      fontSize: "13px",
+                      fontSize: "12px",
                       fontFamily: "Arial",
                       fontWeight: "bold",
                       marginBottom: "5px",
@@ -1738,14 +1278,13 @@ const ApplicantExamPermit = ({ personId, steps }) => {
                   </div>
                 </div>
 
-                {/* Profile + QR Code (Right Side) */}
                 <div
                   style={{
                     display: "flex",
-                    flexDirection: "row", // ✅ side by side
+                    flexDirection: "row",
                     alignItems: "center",
                     marginRight: "10px",
-                    gap: "10px", // ✅ 10px space between them
+                    gap: "10px",
                   }}
                 >
                   <div
@@ -1755,40 +1294,12 @@ const ApplicantExamPermit = ({ personId, steps }) => {
                       display: "flex",
                       justifyContent: "center",
                       alignItems: "center",
-                      border: "1px solid black", // ✅ same border as profile_img
-                      background: "#fff", // ✅ same background
+                      border: "1px solid black",
+                      background: "#fff",
                       flexShrink: 0,
-                      position: "relative", // ✅ needed for overlay text
+                      position: "relative",
                     }}
-                  >
-                    {person?.qr_code ? (
-                      <img
-                        src={`${API_BASE_URL}/uploads/${person.qr_code}`}
-                        alt="QR Code"
-                        style={{ width: "110px", height: "110px" }}
-                      />
-                    ) : (
-                      <QRCodeSVG
-                        value={`${window.location.origin}/applicant_profile/${person.applicant_number}`}
-                        size={110}
-                        level="H"
-                      />
-                    )}
-
-                    {/* Overlay applicant_number in middle */}
-                    <div
-                      style={{
-                        position: "absolute",
-                        fontSize: "10px",
-                        fontWeight: "bold",
-                        color: "maroon",
-                        background: "white",
-                        padding: "2px",
-                      }}
-                    >
-                      {person.applicant_number}
-                    </div>
-                  </div>
+                  />
                 </div>
               </div>
             </div>
@@ -1801,22 +1312,16 @@ const ApplicantExamPermit = ({ personId, steps }) => {
               fontFamily: "Arial",
               width: "8in",
               margin: "0 auto",
-
               marginTop: "-30px",
               textAlign: "center",
               tableLayout: "fixed",
             }}
           >
             <tbody>
-              {/* Name of Student Row */}
               <tr>
                 <td
                   colSpan={40}
-                  style={{
-                    fontSize: "12px",
-                    paddingTop: "5px",
-                    marginTop: 0,
-                  }}
+                  style={{ fontSize: "12px", paddingTop: "5px", marginTop: 0 }}
                 >
                   <div
                     style={{
@@ -1845,55 +1350,43 @@ const ApplicantExamPermit = ({ personId, steps }) => {
                         style={{
                           width: "25%",
                           textAlign: "center",
-                          fontSize: "14.5px",
+                          fontSize: "12px",
                           borderBottom: "1px solid black",
                         }}
-                      >
-                        {person.last_name}
-                      </span>
+                      />
                       <span
                         style={{
                           width: "25%",
                           textAlign: "center",
-                          fontSize: "14.5px",
+                          fontSize: "12px",
                           borderBottom: "1px solid black",
                         }}
-                      >
-                        {person.first_name}
-                      </span>
+                      />
                       <span
                         style={{
                           width: "25%",
                           textAlign: "center",
-                          fontSize: "14.5px",
+                          fontSize: "12px",
                           borderBottom: "1px solid black",
                         }}
-                      >
-                        {person.middle_name}
-                      </span>
+                      />
                       <span
                         style={{
                           width: "25%",
                           textAlign: "center",
-                          fontSize: "14.5px",
+                          fontSize: "12px",
                           borderBottom: "1px solid black",
                         }}
-                      >
-                        {person.extension}
-                      </span>
+                      />
                     </div>
                   </div>
                 </td>
               </tr>
 
-              {/* Labels Row */}
               <tr>
                 <td
                   colSpan={40}
-                  style={{
-                    fontSize: "12px",
-                    paddingTop: "2px",
-                  }}
+                  style={{ fontSize: "12px", paddingTop: "2px" }}
                 >
                   <div
                     style={{
@@ -1919,8 +1412,7 @@ const ApplicantExamPermit = ({ personId, steps }) => {
                 </td>
               </tr>
 
-              {/* Email & Applicant ID */}
-              <tr style={{ fontSize: "13px" }}>
+              <tr style={{ fontSize: "12px" }}>
                 <td colSpan={20}>
                   <div
                     style={{
@@ -1946,9 +1438,10 @@ const ApplicantExamPermit = ({ personId, steps }) => {
                         fontSize: "12px",
                       }}
                     >
-                      <div style={{ marginTop: "-3px" }} className="dataField">
-                        {person.emailAddress}
-                      </div>
+                      <div
+                        style={{ marginTop: "-3px" }}
+                        className="dataField"
+                      />
                     </span>
                   </div>
                 </td>
@@ -1977,16 +1470,16 @@ const ApplicantExamPermit = ({ personId, steps }) => {
                         fontSize: "12px",
                       }}
                     >
-                      <div style={{ marginTop: "-3px" }} className="dataField">
-                        {person.emailAddress}
-                      </div>
+                      <div
+                        style={{ marginTop: "-3px" }}
+                        className="dataField"
+                      />
                     </span>
                   </div>
                 </td>
               </tr>
 
-              {/* Permanent Address */}
-              <tr style={{ fontSize: "13px" }}>
+              <tr style={{ fontSize: "12px" }}>
                 <td colSpan={40}>
                   <div
                     style={{
@@ -2013,18 +1506,16 @@ const ApplicantExamPermit = ({ personId, steps }) => {
                         fontSize: "12px",
                       }}
                     >
-                      <div style={{ marginTop: "-3px" }} className="dataField">
-                        {person.permanentStreet} {person.permanentBarangay}{" "}
-                        {person.permanentMunicipality} {person.permanentRegion}{" "}
-                        {person.permanentZipCode}
-                      </div>
+                      <div
+                        style={{ marginTop: "-3px" }}
+                        className="dataField"
+                      />
                     </span>
                   </div>
                 </td>
               </tr>
 
-              {/* Cellphone No, Civil Status, Gender */}
-              <tr style={{ fontSize: "13px" }}>
+              <tr style={{ fontSize: "12px" }}>
                 <td colSpan={13}>
                   <div
                     style={{
@@ -2050,9 +1541,10 @@ const ApplicantExamPermit = ({ personId, steps }) => {
                         fontSize: "12px",
                       }}
                     >
-                      <div style={{ marginTop: "-3px" }} className="dataField">
-                        {person.cellphoneNumber}
-                      </div>
+                      <div
+                        style={{ marginTop: "-3px" }}
+                        className="dataField"
+                      />
                     </span>
                   </div>
                 </td>
@@ -2081,9 +1573,10 @@ const ApplicantExamPermit = ({ personId, steps }) => {
                         fontSize: "12px",
                       }}
                     >
-                      <div style={{ marginTop: "-3px" }} className="dataField">
-                        {person.civilStatus}
-                      </div>
+                      <div
+                        style={{ marginTop: "-3px" }}
+                        className="dataField"
+                      />
                     </span>
                   </div>
                 </td>
@@ -2112,21 +1605,16 @@ const ApplicantExamPermit = ({ personId, steps }) => {
                         fontSize: "12px",
                       }}
                     >
-                      <div style={{ marginTop: "-3px" }} className="dataField">
-                        {" "}
-                        {person.gender === 0
-                          ? "Male"
-                          : person.gender === 1
-                            ? "Female"
-                            : ""}
-                      </div>
+                      <div
+                        style={{ marginTop: "-3px" }}
+                        className="dataField"
+                      />
                     </span>
                   </div>
                 </td>
               </tr>
 
-              {/* Date of Birth, Place of Birth, Age */}
-              <tr style={{ fontSize: "13px" }}>
+              <tr style={{ fontSize: "12px" }}>
                 <td colSpan={13}>
                   <div
                     style={{
@@ -2152,9 +1640,10 @@ const ApplicantExamPermit = ({ personId, steps }) => {
                         fontSize: "12px",
                       }}
                     >
-                      <div style={{ marginTop: "-3px" }} className="dataField">
-                        {person.birthOfDate}
-                      </div>
+                      <div
+                        style={{ marginTop: "-3px" }}
+                        className="dataField"
+                      />
                     </span>
                   </div>
                 </td>
@@ -2162,7 +1651,7 @@ const ApplicantExamPermit = ({ personId, steps }) => {
                   <div
                     style={{
                       display: "flex",
-                      alignItems: "center",
+                      alignItems: "flex-start",
                       width: "100%",
                     }}
                   >
@@ -2177,15 +1666,16 @@ const ApplicantExamPermit = ({ personId, steps }) => {
                     </label>
                     <span
                       style={{
-                        flexGrow: 1,
+                        flex: 1,
                         borderBottom: "1px solid black",
-                        height: "1.3em",
                         fontSize: "12px",
+                        minWidth: 0,
+                        whiteSpace: "normal",
+                        overflowWrap: "break-word",
+                        wordBreak: "break-word",
                       }}
                     >
-                      <div style={{ marginTop: "-3px" }} className="dataField">
-                        {person.birthPlace}
-                      </div>
+                      <div className="dataField">&nbsp;</div>
                     </span>
                   </div>
                 </td>
@@ -2214,16 +1704,16 @@ const ApplicantExamPermit = ({ personId, steps }) => {
                         fontSize: "12px",
                       }}
                     >
-                      <div style={{ marginTop: "-3px" }} className="dataField">
-                        {person.age}
-                      </div>
+                      <div
+                        style={{ marginTop: "-3px" }}
+                        className="dataField"
+                      />
                     </span>
                   </div>
                 </td>
               </tr>
 
-              <tr style={{ fontSize: "13px" }}>
-                {/* Please Check */}
+              <tr style={{ fontSize: "12px" }}>
                 <td colSpan={10}>
                   <div
                     style={{
@@ -2248,13 +1738,10 @@ const ApplicantExamPermit = ({ personId, steps }) => {
                         height: "1.3em",
                         display: "inline-block",
                       }}
-                    >
-                      {/* left blank intentionally */}
-                    </span>
+                    />
                   </div>
                 </td>
 
-                {/* Freshman */}
                 <td colSpan={10}>
                   <div
                     style={{
@@ -2283,16 +1770,14 @@ const ApplicantExamPermit = ({ personId, steps }) => {
                         fontWeight: "bold",
                       }}
                     >
-                      <div style={{ marginTop: "-3px" }} className="dataField">
-                        {person.classifiedAs === "Freshman (First Year)"
-                          ? "✓"
-                          : ""}
-                      </div>
+                      <div
+                        style={{ marginTop: "-3px" }}
+                        className="dataField"
+                      />
                     </span>
                   </div>
                 </td>
 
-                {/* Transferee */}
                 <td colSpan={10}>
                   <div
                     style={{
@@ -2321,18 +1806,14 @@ const ApplicantExamPermit = ({ personId, steps }) => {
                         fontWeight: "bold",
                       }}
                     >
-                      <div style={{ marginTop: "-3px" }} className="dataField">
-                        {["Transferee", "Returnee", "Shiftee"].includes(
-                          person.classifiedAs,
-                        )
-                          ? "✓"
-                          : ""}
-                      </div>
+                      <div
+                        style={{ marginTop: "-3px" }}
+                        className="dataField"
+                      />
                     </span>
                   </div>
                 </td>
 
-                {/* Others */}
                 <td colSpan={10}>
                   <div
                     style={{
@@ -2361,16 +1842,16 @@ const ApplicantExamPermit = ({ personId, steps }) => {
                         fontWeight: "bold",
                       }}
                     >
-                      <div style={{ marginTop: "-3px" }} className="dataField">
-                        {person.classifiedAs === "Foreign Student" ? "✓" : ""}
-                      </div>
+                      <div
+                        style={{ marginTop: "-3px" }}
+                        className="dataField"
+                      />
                     </span>
                   </div>
                 </td>
               </tr>
 
-              {/* Last School Attended */}
-              <tr style={{ fontSize: "13px" }}>
+              <tr style={{ fontSize: "12px" }}>
                 <td colSpan={40}>
                   <div
                     style={{
@@ -2396,16 +1877,16 @@ const ApplicantExamPermit = ({ personId, steps }) => {
                         fontSize: "12px",
                       }}
                     >
-                      <div style={{ marginTop: "-3px" }} className="dataField">
-                        {person.schoolLastAttended1}
-                      </div>
+                      <div
+                        style={{ marginTop: "-3px" }}
+                        className="dataField"
+                      />
                     </span>
                   </div>
                 </td>
               </tr>
 
-              {/* Degree/Program & Major */}
-              <tr style={{ fontSize: "13px" }}>
+              <tr style={{ fontSize: "12px" }}>
                 <td colSpan={25} style={{ verticalAlign: "top" }}>
                   <div
                     style={{
@@ -2428,20 +1909,13 @@ const ApplicantExamPermit = ({ personId, steps }) => {
                         flexGrow: 1,
                         borderBottom: "1px solid black",
                         minHeight: "1.2em",
-                        whiteSpace: "normal", // allow text wrapping
-                        wordWrap: "break-word", // break long words
+                        whiteSpace: "normal",
+                        wordWrap: "break-word",
                         lineHeight: "1.4em",
                         paddingBottom: "2px",
                       }}
                     >
-                      {curriculumOptions.length > 0
-                        ? curriculumOptions.find(
-                            (item) =>
-                              item?.curriculum_id?.toString() ===
-                              (person?.program ?? "").toString(),
-                          )?.program_description ||
-                          (person?.program ?? "")
-                        : "Loading..."}
+                      &nbsp;
                     </div>
                   </div>
                 </td>
@@ -2474,35 +1948,24 @@ const ApplicantExamPermit = ({ personId, steps }) => {
                         paddingBottom: "2px",
                       }}
                     >
-                      {curriculumOptions.length > 0
-                        ? curriculumOptions.find(
-                            (item) =>
-                              item?.curriculum_id?.toString() ===
-                              (person?.program ?? "").toString(),
-                          )?.major || ""
-                        : "Loading..."}
+                      &nbsp;
                     </div>
                   </div>
                 </td>
               </tr>
 
               <tr>
-                <td colSpan="40" style={{ height: "0.5px" }}></td>
+                <td colSpan="40" style={{ height: "10px" }}></td>
               </tr>
 
               <tr>
                 <td
                   colSpan={40}
-                  style={{
-                    height: "0.2in",
-                    fontSize: "72.5%",
-                    color: "white", // This is just a fallback; overridden below
-                  }}
+                  style={{ height: "0.2in", fontSize: "72.5%", color: "white" }}
                 >
                   <div
                     style={{
                       color: "black",
-
                       fontSize: "12px",
                       textAlign: "left",
                       display: "block",
@@ -2573,11 +2036,9 @@ const ApplicantExamPermit = ({ personId, steps }) => {
                     border: "1px solid black",
                     textAlign: "center",
                     padding: "8px",
-                    fontSize: "18px",
+                    fontSize: "12px",
                   }}
-                >
-                  {steps.step1 && renderStepStatus(steps.step1Status)}
-                </td>
+                ></td>
                 <td
                   colSpan={5}
                   style={{
@@ -2589,11 +2050,8 @@ const ApplicantExamPermit = ({ personId, steps }) => {
                   <ForwardIcon
                     sx={{
                       marginTop: "-53px",
-                      fontSize: 70, // normal screen size
-                      "@media print": {
-                        fontSize: 14, // smaller print size
-                        margin: 0,
-                      },
+                      fontSize: 70,
+                      "@media print": { fontSize: 14, margin: 0 },
                     }}
                   />
                 </td>
@@ -2612,39 +2070,27 @@ const ApplicantExamPermit = ({ personId, steps }) => {
                     border: "1px solid black",
                     textAlign: "center",
                     padding: "8px",
-                    fontSize: "18px",
+                    fontSize: "12px",
                   }}
-                >
-                  {steps.qualifyingDone &&
-                    renderStepStatus(steps.qualifyingStatus)}
-                </td>
+                ></td>
                 <td
                   colSpan={5}
                   style={{
                     border: "1px solid black",
                     textAlign: "center",
                     padding: "8px",
-                    fontSize: "18px",
+                    fontSize: "12px",
                   }}
-                >
-                  {steps.interviewDone &&
-                    renderStepStatus(steps.interviewStatus)}
-                </td>
+                ></td>
                 <td
                   colSpan={5}
-                  style={{
-                    textAlign: "center",
-                    verticalAlign: "middle",
-                  }}
+                  style={{ textAlign: "center", verticalAlign: "middle" }}
                 >
                   <ForwardIcon
                     sx={{
                       marginTop: "-53px",
-                      fontSize: 70, // normal screen size
-                      "@media print": {
-                        fontSize: 14, // smaller print size
-                        margin: 0,
-                      },
+                      fontSize: 70,
+                      "@media print": { fontSize: 14, margin: 0 },
                     }}
                   />
                 </td>
@@ -2669,10 +2115,7 @@ const ApplicantExamPermit = ({ personId, steps }) => {
                 </td>
                 <td
                   colSpan={5}
-                  style={{
-                    textAlign: "center",
-                    verticalAlign: "middle",
-                  }}
+                  style={{ textAlign: "center", verticalAlign: "middle" }}
                 ></td>
 
                 <td
@@ -2692,10 +2135,7 @@ const ApplicantExamPermit = ({ personId, steps }) => {
                 </td>
                 <td
                   colSpan={5}
-                  style={{
-                    textAlign: "center",
-                    verticalAlign: "middle",
-                  }}
+                  style={{ textAlign: "center", verticalAlign: "middle" }}
                 ></td>
                 <td
                   colSpan={10}
@@ -2721,27 +2161,18 @@ const ApplicantExamPermit = ({ personId, steps }) => {
                     border: "1px solid black",
                     textAlign: "center",
                     padding: "8px",
-                    fontSize: "18px",
+                    fontSize: "12px",
                   }}
-                >
-                  {steps?.step3Status &&
-                    renderCollegeApprovalStatus(steps.step3Status)}
-                </td>
+                ></td>
                 <td
                   colSpan={5}
-                  style={{
-                    textAlign: "center",
-                    verticalAlign: "middle",
-                  }}
+                  style={{ textAlign: "center", verticalAlign: "middle" }}
                 >
                   <ForwardIcon
                     sx={{
                       marginTop: "-53px",
-                      fontSize: 70, // normal screen size
-                      "@media print": {
-                        fontSize: 14, // smaller print size
-                        margin: 0,
-                      },
+                      fontSize: 70,
+                      "@media print": { fontSize: 14, margin: 0 },
                     }}
                   />
                 </td>
@@ -2750,55 +2181,38 @@ const ApplicantExamPermit = ({ personId, steps }) => {
                   colSpan={11}
                   style={{
                     height: "50px",
-                    fontSize: "18px",
+                    fontSize: "12px",
                     fontFamily: "Arial",
                     border: "1px solid black",
                     padding: "8px",
-                    textAlign: "center",
+                    textAlign: "left",
                   }}
-                >
-                  {steps.step4 && (
-                    <span style={{ color: "green", fontWeight: "bold" }}>
-                      ✔ DONE
-                    </span>
-                  )}
-                </td>
+                ></td>
                 <td
                   colSpan={5}
-                  style={{
-                    textAlign: "center",
-                    verticalAlign: "middle",
-                  }}
+                  style={{ textAlign: "center", verticalAlign: "middle" }}
                 >
                   <ForwardIcon
                     sx={{
                       marginTop: "-53px",
-                      fontSize: 70, // normal screen size
-                      "@media print": {
-                        fontSize: 14, // smaller print size
-                        margin: 0,
-                      },
+                      fontSize: 70,
+                      "@media print": { fontSize: 14, margin: 0 },
                     }}
                   />
                 </td>
                 <td
                   colSpan={10}
                   style={{
-                    fontSize: "18px",
+                    fontSize: "12px",
                     fontFamily: "Arial",
                     border: "1px solid black",
                     padding: "8px",
-                    textAlign: "center",
+                    textAlign: "left",
                   }}
                 >
-                  {steps.step5 && (
-                    <span style={{ color: "green", fontWeight: "bold" }}>
-                      ✔ DONE
-                    </span>
-                  )}
+                  {" "}
                 </td>
               </tr>
-
               <tr>
                 <td
                   colSpan={40}
@@ -2811,22 +2225,29 @@ const ApplicantExamPermit = ({ personId, steps }) => {
                 >
                   <div
                     style={{
-                      fontWeight: "normal",
+                      display: "flex",
+                      justifyContent: "space-between",
+                      alignItems: "center",
+                      marginTop: "10px",
                       fontSize: "12px",
                       color: "black",
-                      textAlign: "right",
+                      fontWeight: "normal",
                     }}
                   >
-                    Registrar's Copy
+                    <span>
+                      {branding.shortTerm || shortTerm}-QSF-AS-001 Rev. 00
+                      (7.3.25)
+                    </span>
+                    <span>Registrar's Copy</span>
                   </div>
                 </td>
               </tr>
             </tbody>
           </table>
         </div>
-      </Box>
+      </Container>
     </Box>
   );
-};
+});
 
-export default ApplicantExamPermit;
+export default EmptyAdmissionFormProcess;
